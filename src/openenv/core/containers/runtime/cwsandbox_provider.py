@@ -193,6 +193,7 @@ class CWSandboxProvider(ContainerProvider):
 
         sandbox_id = getattr(sandbox, "sandbox_id", None)
         stop_error: BaseException | None = None
+        deleted = False
         try:
             self._result_with_retries(lambda: sandbox.stop(missing_ok=True))
         except Exception as exc:
@@ -208,13 +209,16 @@ class CWSandboxProvider(ContainerProvider):
                         missing_ok=True,
                     )
                 )
+                deleted = True
+
+        # A completed delete releases ownership even if stopping failed.
+        if stop_error is None or deleted:
+            self._sandbox = None
+            self._base_env_url = None
+            self._redact_values = set()
 
         if stop_error is not None:
             raise stop_error
-
-        self._sandbox = None
-        self._base_env_url = None
-        self._redact_values = set()
 
     def close(self) -> None:
         """Stop the active sandbox, if any."""

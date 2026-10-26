@@ -393,3 +393,75 @@ def test_failed_cleanup_preserves_ownership_for_retry(fake_sdk, failure):
     with pytest.raises(RuntimeError, match="no active base_url"):
         _ = provider.base_url
     provider.stop_container()
+
+
+@pytest.mark.parametrize("startup_failure", [False, True])
+def test_successful_delete_releases_ownership_despite_stop_error(
+    fake_sdk, startup_failure
+):
+    provider = CWSandboxProvider(sdk=fake_sdk)
+    sandbox = fake_sdk._sandbox_cls.instance
+    stop_error = RuntimeError("stop failed")
+    with (
+        patch.object(sandbox, "stop", return_value=_FakeRef(stop_error)),
+        patch("openenv.core.containers.runtime.cwsandbox_provider.time.sleep"),
+    ):
+        if startup_failure:
+            with patch.object(
+                sandbox, "wait", side_effect=ValueError("startup failed")
+            ):
+                with pytest.raises(ValueError, match="startup failed"):
+                    provider.start_container(
+                        "coding-env:latest", env_vars={"TOKEN": "secret"}
+                    )
+        else:
+            provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret"})
+            with pytest.raises(RuntimeError, match="stop failed") as exc:
+                provider.stop_container()
+            assert exc.value is stop_error
+
+    assert len(fake_sdk._sandbox_cls.deleted) == 1
+    assert provider.sandbox_id is None
+    assert provider._redact_values == set()
+    with pytest.raises(RuntimeError, match="no active base_url"):
+        _ = provider.base_url
+    with patch.object(sandbox, "stop") as stop:
+        provider.close()
+        stop.assert_not_called()
+    assert len(fake_sdk._sandbox_cls.deleted) == 1
+
+    fake_sdk._sandbox_cls.instance = _FakeSandbox()
+    provider.start_container("other-env:latest")
+    assert fake_sdk._sandbox_cls.run_count == 2
+    provider.close()
+
+
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_delete_result_failure_retains_ownership_until_retry(fake_sdk, stop_fails):
+    provider = CWSandboxProvider(sdk=fake_sdk)
+    url = provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret"})
+    sandbox = fake_sdk._sandbox_cls.instance
+    delete_error = RuntimeError("delete failed")
+    with (
+        patch.object(
+            sandbox,
+            "stop",
+            return_value=_FakeRef(RuntimeError("stop failed") if stop_fails else None),
+        ),
+        patch.object(fake_sdk.Sandbox, "delete", return_value=_FakeRef(delete_error)),
+        patch("openenv.core.containers.runtime.cwsandbox_provider.time.sleep"),
+    ):
+        with pytest.raises(RuntimeError, match="delete failed") as exc:
+            provider.close()
+        assert exc.value is delete_error
+    assert provider.sandbox_id == "sandbox-123"
+    assert provider.base_url == url
+    assert provider._redact_values == {"secret"}
+    with pytest.raises(RuntimeError, match="already has an active sandbox"):
+        provider.start_container("other-env:latest")
+    assert fake_sdk._sandbox_cls.run_count == 1
+    provider.close()
+    assert provider.sandbox_id is None
+    assert provider._redact_values == set()
+    provider.close()
+    assert len(fake_sdk._sandbox_cls.deleted) == 1

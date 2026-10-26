@@ -1,6 +1,6 @@
 # OpenEnv Wordle with GRPO using TRL
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/huggingface/trl/blob/main/examples/notebooks/openenv_wordle_grpo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/huggingface/trl/blob/main/examples/grpo_wordle/grpo_wordle.ipynb)
 
 ![trl banner](https://huggingface.co/datasets/trl-lib/documentation-images/resolve/main/trl_banner_dark.png)
 
@@ -69,6 +69,8 @@ For more information, refer to the [TRL-OpenEnv documentation](https://huggingfa
 from envs.textarena_env import TextArenaEnv
 
 textarena_url = "https://burtenshaw-textarena.hf.space" # Duplicate the Space and update this!
+# GRPOTrainer calls rollout_func synchronously; EnvClient calls block automatically
+# in synchronous code.
 env = TextArenaEnv(base_url=textarena_url)
 ```
 

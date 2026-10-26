@@ -1,13 +1,12 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "openenv[core]",
+#     # Plain `openenv`: there is no `core` extra. The published extras are
+#     # daytona, aca, modal and inspect, and uv only warns before installing
+#     # the base package anyway, so the old spelling polluted every job log.
+#     "openenv",
 #     "trl",
 #     "datasets",
 #     "torch",
@@ -19,7 +18,7 @@
 
 Single-step env, so this is a plain prompt -> completion -> reward GRPO setup:
 no `environment_factory`/tool-calling needed. Uses `GenericEnvClient` so the
-script only depends on `openenv[core]` from PyPI, which also makes it runnable
+script only depends on `openenv` from PyPI, which also makes it runnable
 as a standalone `uv` script, including via Hugging Face Jobs:
 
     hf jobs uv run examples/sophistry_bench_sprint_grpo.py --flavor a10g-small \
@@ -30,7 +29,7 @@ Connects via a manually-built `UVProvider` + `GenericEnvClient` rather than
 (`SUPPORTS_CONCURRENT_SESSIONS = False`), and `from_env()` + `.sync()` can
 leave behind an orphaned first connection that occupies that single slot (see
 https://github.com/huggingface/OpenEnv/pull/854). Needs the `project_path`
-git-clone fix from that PR; until it's released, override the `openenv[core]`
+git-clone fix from that PR; until it's released, override the `openenv`
 dependency above with a git ref of it.
 
 Run locally:

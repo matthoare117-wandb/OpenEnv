@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """
 Modal container provider for running OpenEnv environments in Modal sandboxes.
@@ -21,14 +17,12 @@ see https://modal.com/docs/guide/sandbox-v2 .
 
 from __future__ import annotations
 
-import json
 import logging
 import shlex
 import time
 from typing import Any, Dict, Optional
 
-import yaml
-
+from ._server_config import parse_dockerfile_cmd, parse_openenv_app_field
 from .providers import ContainerProvider
 
 logger = logging.getLogger(__name__)
@@ -182,6 +176,8 @@ class ModalProvider(ContainerProvider):
     def __init__(
         self,
         *,
+        image: str | None = None,
+        env_vars: dict[str, str] | None = None,
         app_name: str = "openenv",
         use_sandbox_v2: bool = False,
         timeout: int = 300,
@@ -193,6 +189,12 @@ class ModalProvider(ContainerProvider):
     ):
         """
         Args:
+            image (`str`, *optional*):
+                Registry image tag or ``"dockerfile:<path>"`` source to use
+                when ``start_container()`` is called without an image.
+            env_vars (`dict`, *optional*):
+                Environment variables to use when ``start_container()`` is
+                called without explicit ``env_vars``.
             app_name (`str`, *optional*, defaults to `"openenv"`):
                 Modal app name the sandbox is created under. Looked up (and
                 created if missing) via ``modal.App.lookup``.
@@ -223,6 +225,8 @@ class ModalProvider(ContainerProvider):
                 orchestrator/CI logs. When `True`, a best-effort redacted,
                 length-bounded excerpt is included in startup-crash errors.
         """
+        self._image = image
+        self._env_vars = env_vars
         self._app_name = app_name
         self._use_sandbox_v2 = use_sandbox_v2
         self._timeout = timeout
@@ -312,19 +316,7 @@ class ModalProvider(ContainerProvider):
 
         Uses PyYAML to handle comments, quotes, and nested keys correctly.
         """
-        try:
-            data = yaml.safe_load(yaml_content) or {}
-        except Exception:
-            return None
-
-        if not isinstance(data, dict):
-            return None
-
-        value = data.get("app")
-        if isinstance(value, str):
-            value = value.strip()
-            return value if value else None
-        return None
+        return parse_openenv_app_field(yaml_content)
 
     @staticmethod
     def _parse_dockerfile_cmd(dockerfile_content: str) -> str | None:
@@ -339,31 +331,7 @@ class ModalProvider(ContainerProvider):
         Returns:
             The command as a single string, or ``None`` if no ``CMD`` found.
         """
-        import re
-
-        last_cmd: str | None = None
-        for line in dockerfile_content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            match = re.match(r"CMD\s+(.+)", stripped, flags=re.IGNORECASE)
-            if match:
-                last_cmd = match.group(1).strip()
-
-        if last_cmd is None:
-            return None
-
-        # Exec form: CMD ["executable", "param1", ...]
-        if last_cmd.startswith("["):
-            try:
-                parts = json.loads(last_cmd)
-                if isinstance(parts, list) and all(isinstance(p, str) for p in parts):
-                    return " ".join(parts)
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        # Shell form: CMD executable param1 ...
-        return last_cmd if last_cmd else None
+        return parse_dockerfile_cmd(dockerfile_content)
 
     @classmethod
     def image_from_dockerfile(
@@ -467,7 +435,7 @@ class ModalProvider(ContainerProvider):
 
     def start_container(
         self,
-        image: str,
+        image: str | None = None,
         port: int | None = None,
         env_vars: dict[str, str] | None = None,
         **kwargs: Any,
@@ -487,10 +455,11 @@ class ModalProvider(ContainerProvider):
            ``image_from_dockerfile``).
 
         Args:
-            image (`str`):
+            image (`str`, *optional*):
                 Registry image tag (e.g. ``"echo-env:latest"``) or
                 ``"dockerfile:<path>"`` returned by
-                :meth:`image_from_dockerfile`.
+                :meth:`image_from_dockerfile`. May be omitted when supplied to
+                the constructor.
             port (`int`, *optional*):
                 Must be ``None`` or ``8000``. Modal exposes port 8000 via an
                 encrypted tunnel; other ports raise ``ValueError``.
@@ -517,18 +486,26 @@ class ModalProvider(ContainerProvider):
                 f"{_DEFAULT_MODAL_PORT} inside the sandbox."
             )
 
+        effective_image = image if image is not None else self._image
+        if effective_image is None:
+            raise ValueError(
+                "ModalProvider requires an image. Pass it to the constructor "
+                "or start_container()."
+            )
+        effective_env_vars = self._env_vars if env_vars is None else env_vars
+
         # Resolve the server command (may be None; discovery happens after
         # sandbox creation when we can inspect the filesystem).
         cmd = kwargs.pop("cmd", None) or self._cmd
 
         # CMD parsed from Dockerfile (populated for "dockerfile:" images).
         parsed_cmd: str | None = None
-        if image.startswith("dockerfile:"):
-            meta = self._dockerfile_registry.get(image[len("dockerfile:") :])
+        if effective_image.startswith("dockerfile:"):
+            meta = self._dockerfile_registry.get(effective_image[len("dockerfile:") :])
             if meta is not None:
                 parsed_cmd = meta.get("server_cmd")
 
-        modal_image = self._build_image(image)
+        modal_image = self._build_image(effective_image)
 
         extra: Dict[str, Any] = dict(kwargs)
         if self._cpu is not None:
@@ -538,7 +515,9 @@ class ModalProvider(ContainerProvider):
 
         # Record injected secret values so captured server output can be
         # scrubbed before it is ever surfaced in an error.
-        self._redact_values = {value for value in (env_vars or {}).values() if value}
+        self._redact_values = {
+            value for value in (effective_env_vars or {}).values() if value
+        }
 
         # A create failure created nothing, so just drop the recorded secrets
         # and re-raise (the double-start guard above guarantees there is no
@@ -548,7 +527,7 @@ class ModalProvider(ContainerProvider):
                 image=modal_image,
                 encrypted_ports=[_DEFAULT_MODAL_PORT],
                 timeout=self._timeout,
-                env=env_vars,
+                env=effective_env_vars,
                 extra=extra,
             )
         except Exception:

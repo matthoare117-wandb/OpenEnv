@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """
 Unit tests for AutoEnv and AutoAction
@@ -258,10 +254,53 @@ class TestAutoEnvFromName:
 class TestAutoEnvHubDetection:
     """Test AutoEnv Hub URL detection and handling."""
 
+    def test_documented_echo_space_path(self, mock_discovery, mock_env_info):
+        """Test the canonical Echo Space ID with its explicit runtime URL."""
+        mock_discovery.get_environment_by_name.return_value = mock_env_info
+        mock_client_class = Mock()
+        mock_client_instance = Mock()
+        mock_client_class.return_value = mock_client_instance
+        mock_env_info.get_client_class = Mock(return_value=mock_client_class)
+        base_url = "https://openenv-echo-env.hf.space"
+
+        with (
+            patch("openenv.auto.auto_env.get_discovery", return_value=mock_discovery),
+            patch.object(AutoEnv, "_check_space_availability", return_value=False),
+            patch.object(
+                AutoEnv,
+                "_ensure_package_from_hub",
+                return_value="echo",
+            ) as ensure_package,
+            patch.object(AutoEnv, "_check_server_availability", return_value=True),
+        ):
+            result = AutoEnv.from_env(
+                "openenv/echo_env",
+                base_url=base_url,
+            )
+
+        assert result is mock_client_instance
+        ensure_package.assert_called_once_with(
+            "openenv/echo_env",
+            trust_remote_code=False,
+        )
+        mock_client_class.assert_called_once_with(base_url=base_url, provider=None)
+
     def test_resolve_space_url(self):
         """Test resolving HuggingFace Space URL."""
         url = AutoEnv._resolve_space_url("wukaixingxp/coding-env-test")
         assert url == "https://wukaixingxp-coding-env-test.hf.space"
+
+    @pytest.mark.parametrize(
+        "repo_id, expected",
+        [
+            ("openenv/echo_env", "https://openenv-echo-env.hf.space"),
+            ("openenv/repl_env-0.2.2", "https://openenv-repl-env-0-2-2.hf.space"),
+            ("User/My_Env", "https://user-my-env.hf.space"),
+        ],
+    )
+    def test_resolve_space_url_normalizes_subdomain(self, repo_id, expected):
+        """Space subdomains are lowercase with non-alphanumerics replaced by '-'."""
+        assert AutoEnv._resolve_space_url(repo_id) == expected
 
     def test_resolve_space_url_from_full_url(self):
         """Test resolving from full HuggingFace URL."""

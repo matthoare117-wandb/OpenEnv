@@ -48,7 +48,7 @@ class _FakeNetworkOptions:
 class _FakeSandbox:
     def __init__(self):
         self.sandbox_id = "sandbox-123"
-        self.service_address = "sandbox.example.test:8000"
+        self.service_address = "https://sandbox.example.test:8000"
         self.exposed_ports = ((8000, "http"),)
         self.exec_calls: list[list[str]] = []
         self.wait_calls: list[float | None] = []
@@ -137,7 +137,7 @@ def test_start_container_configures_sandbox(fake_sdk):
     )
 
     kwargs = fake_sdk._sandbox_cls.last_run_kwargs
-    assert url == "http://sandbox.example.test:8000"
+    assert url == "https://sandbox.example.test:8000"
     assert kwargs["container_image"] == "coding-env:latest"
     assert kwargs["environment_variables"] == {"DEBUG": "1"}
     assert kwargs["request_timeout_seconds"] == 123
@@ -151,14 +151,14 @@ def test_start_container_configures_sandbox(fake_sdk):
 
 
 def test_base_url_requires_active_sandbox(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
 
     with pytest.raises(RuntimeError, match="no active base_url"):
         _ = provider.base_url
 
 
 def test_start_container_finds_openenv_yaml_with_generic_search(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
 
     provider.start_container("coding-env:latest")
 
@@ -172,38 +172,84 @@ def test_start_container_finds_openenv_yaml_with_generic_search(fake_sdk):
 
 
 def test_port_other_than_8000_raises(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
 
     with pytest.raises(ValueError, match="only supports port 8000"):
         provider.start_container("coding-env:latest", port=3000)
 
 
-def test_service_address_uses_exposed_port_scheme(fake_sdk):
-    fake_sdk._sandbox_cls.instance.service_address = (
-        "e67b6f1841b3.c2d60ed8.builds.cwsandbox.com:443"
-    )
-    fake_sdk._sandbox_cls.instance.exposed_ports = ((8000, "http"),)
+@pytest.mark.parametrize(
+    "address", ["http://remote.test", "remote.test:443", "ws://remote.test"]
+)
+@pytest.mark.parametrize("port_name", ["http", "https"])
+def test_insecure_or_ambiguous_address_fails_closed(fake_sdk, address, port_name):
+    sandbox = fake_sdk._sandbox_cls.instance
+    sandbox.service_address = address
+    sandbox.exposed_ports = ((8000, port_name),)
+    provider = CWSandboxProvider(sdk=fake_sdk, ingress_mode="public")
+    with pytest.raises(RuntimeError, match="HTTPS service_address"):
+        provider.start_container("echo:latest")
+    assert sandbox.stopped
+    assert provider.sandbox_id is None
+    assert not sandbox.exec_calls
+
+
+@pytest.mark.parametrize("ingress_mode", [None, ""])
+def test_ingress_requires_explicit_configuration(fake_sdk, ingress_mode):
+    provider = CWSandboxProvider(sdk=fake_sdk, ingress_mode=ingress_mode)
+    with pytest.raises(ValueError, match="explicit ingress_mode"):
+        provider.start_container("echo:latest")
+    assert fake_sdk._sandbox_cls.run_count == 0
+
+
+def test_default_ingress_does_not_provision(fake_sdk):
     provider = CWSandboxProvider(sdk=fake_sdk)
+    with pytest.raises(ValueError, match="explicit ingress_mode"):
+        provider.start_container("echo:latest")
+    assert fake_sdk._sandbox_cls.run_count == 0
 
-    url = provider.start_container("coding-env:latest")
 
-    assert url == "http://e67b6f1841b3.c2d60ed8.builds.cwsandbox.com:443"
-
-
-def test_service_address_uses_https_exposed_port_scheme(fake_sdk):
-    fake_sdk._sandbox_cls.instance.service_address = (
-        "e67b6f1841b3.c2d60ed8.builds.cwsandbox.com:443"
+def test_provider_owned_startup(fake_sdk):
+    from openenv.core.containers.runtime.wandb_sandbox_provider import (
+        WandbSandboxProvider,
     )
-    fake_sdk._sandbox_cls.instance.exposed_ports = ((8000, "https"),)
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    from openenv.core.generic_client import GenericEnvClient
 
-    url = provider.start_container("coding-env:latest")
+    for provider_class in (CWSandboxProvider, WandbSandboxProvider):
+        provider = provider_class(
+            sdk=fake_sdk, image="echo:stored", ingress_mode="public"
+        )
+        client = GenericEnvClient(provider=provider)
+        with patch.object(provider, "wait_for_ready") as ready:
+            client._start_provider_if_needed()
+        assert fake_sdk._sandbox_cls.last_run_kwargs["container_image"] == "echo:stored"
+        assert client.base_url == "https://sandbox.example.test:8000"
+        ready.assert_called_once_with(client.base_url)
+        provider.close()
+        provider.start_container("echo:override")
+        assert (
+            fake_sdk._sandbox_cls.last_run_kwargs["container_image"] == "echo:override"
+        )
+        provider.close()
 
-    assert url == "https://e67b6f1841b3.c2d60ed8.builds.cwsandbox.com:443"
+
+def test_missing_image_fails_before_provisioning(fake_sdk):
+    provider = CWSandboxProvider(sdk=fake_sdk, ingress_mode="public")
+    with pytest.raises(ValueError, match="requires an image"):
+        provider.start_container()
+    assert fake_sdk._sandbox_cls.run_count == 0
+
+
+def test_plaintext_scheme_rejected(fake_sdk):
+    with pytest.raises(ValueError, match="HTTPS"):
+        CWSandboxProvider(sdk=fake_sdk, url_scheme="http")
+    assert fake_sdk._sandbox_cls.run_count == 0
 
 
 def test_explicit_cmd_skips_yaml_discovery(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk, cmd="python -m server")
+    provider = CWSandboxProvider(
+        ingress_mode="public", sdk=fake_sdk, cmd="python -m server"
+    )
 
     provider.start_container("coding-env:latest")
 
@@ -215,7 +261,7 @@ def test_explicit_cmd_skips_yaml_discovery(fake_sdk):
 
 
 def test_start_container_rejects_second_active_sandbox(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     provider.start_container("coding-env:latest")
 
     with pytest.raises(RuntimeError, match="already has an active sandbox"):
@@ -238,7 +284,7 @@ def test_preflight_rejects_invalid_credentials(fake_sdk):
 
 
 def test_wait_for_ready_polls_health(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     provider.start_container("coding-env:latest")
     response = SimpleNamespace(status_code=200)
 
@@ -254,7 +300,7 @@ def test_wait_for_ready_polls_health(fake_sdk):
 def test_wait_for_ready_suppresses_server_log_by_default(fake_sdk):
     import requests
 
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret-123"})
     fake_sdk._sandbox_cls.instance.dead_process = True
     fake_sdk._sandbox_cls.instance.log = "Traceback TOKEN=secret-123 failed"
@@ -274,7 +320,9 @@ def test_wait_for_ready_suppresses_server_log_by_default(fake_sdk):
 def test_wait_for_ready_redacts_server_log_when_opted_in(fake_sdk):
     import requests
 
-    provider = CWSandboxProvider(sdk=fake_sdk, surface_server_logs=True)
+    provider = CWSandboxProvider(
+        ingress_mode="public", sdk=fake_sdk, surface_server_logs=True
+    )
     provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret-123"})
     fake_sdk._sandbox_cls.instance.dead_process = True
     fake_sdk._sandbox_cls.instance.log = "Traceback TOKEN=secret-123 failed"
@@ -293,7 +341,7 @@ def test_wait_for_ready_redacts_server_log_when_opted_in(fake_sdk):
 
 
 def test_stop_container_is_idempotent_and_deletes(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     provider.start_container("coding-env:latest")
 
     provider.stop_container()
@@ -313,7 +361,7 @@ def test_stop_container_is_idempotent_and_deletes(fake_sdk):
 
 
 def test_close_stops_and_deletes_active_sandbox(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     provider.start_container("coding-env:latest")
 
     provider.close()
@@ -331,7 +379,7 @@ def test_close_stops_and_deletes_active_sandbox(fake_sdk):
 
 
 def test_stop_container_deletes_when_sandbox_is_already_stopped(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     provider.start_container("coding-env:latest")
     fake_sdk._sandbox_cls.instance.stop_error = _SandboxNotRunningError("stopped")
 
@@ -348,7 +396,7 @@ def test_stop_container_deletes_when_sandbox_is_already_stopped(fake_sdk):
 
 
 def test_stop_container_clears_redact_values(fake_sdk):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret-123"})
     assert provider._redact_values == {"secret-123"}
 
@@ -372,7 +420,9 @@ def test_missing_cwsandbox_dependency_raises_runtime_error():
 
 @pytest.mark.parametrize("failure", ["stop", "delete", "both"])
 def test_failed_cleanup_preserves_ownership_for_retry(fake_sdk, failure):
-    provider = CWSandboxProvider(sdk=fake_sdk, delete_on_stop=failure != "stop")
+    provider = CWSandboxProvider(
+        ingress_mode="public", sdk=fake_sdk, delete_on_stop=failure != "stop"
+    )
     provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret-123"})
     sandbox = fake_sdk._sandbox_cls.instance
     if failure in ("stop", "both"):
@@ -399,7 +449,7 @@ def test_failed_cleanup_preserves_ownership_for_retry(fake_sdk, failure):
 def test_successful_delete_releases_ownership_despite_stop_error(
     fake_sdk, startup_failure
 ):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     sandbox = fake_sdk._sandbox_cls.instance
     stop_error = RuntimeError("stop failed")
     with (
@@ -438,7 +488,7 @@ def test_successful_delete_releases_ownership_despite_stop_error(
 
 @pytest.mark.parametrize("stop_fails", [False, True])
 def test_delete_result_failure_retains_ownership_until_retry(fake_sdk, stop_fails):
-    provider = CWSandboxProvider(sdk=fake_sdk)
+    provider = CWSandboxProvider(ingress_mode="public", sdk=fake_sdk)
     url = provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret"})
     sandbox = fake_sdk._sandbox_cls.instance
     delete_error = RuntimeError("delete failed")

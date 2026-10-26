@@ -7,6 +7,7 @@ import os
 import shlex
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from .providers import ContainerProvider
 
@@ -18,13 +19,21 @@ class CWSandboxProvider(ContainerProvider):
 
     The cwsandbox SDK uses a keepalive command by default, so this provider starts
     the OpenEnv server explicitly after the sandbox reaches RUNNING.
+
+    Supply ``image`` here for provider-owned client startup, or to
+    ``start_container`` to override it. Ingress must be explicitly configured;
+    ``ingress_mode="public"`` opts into public access. No private mode is assumed.
+    Startup requires an explicit HTTPS service address from the backend, before
+    any server command runs. The SDK v0.23.3 documented bare-address path is not
+    supported: neither ``url_scheme`` nor an exposed-port name configures TLS.
     """
 
     def __init__(
         self,
         *,
+        image: str | None = None,
         base_url: str | None = None,
-        ingress_mode: str | None = "public",
+        ingress_mode: str | None = None,
         egress_mode: str | None = "internet",
         resources: Any | None = None,
         request_timeout_seconds: float = 300.0,
@@ -35,12 +44,15 @@ class CWSandboxProvider(ContainerProvider):
         profile_names: list[str] | None = None,
         runner_ids: list[str] | None = None,
         cmd: str | None = None,
-        url_scheme: str = "http",
+        url_scheme: str = "https",
         delete_on_stop: bool = True,
         ready_settle_seconds: float = 2.0,
         surface_server_logs: bool = False,
         sdk: Any | None = None,
     ) -> None:
+        if url_scheme.rstrip(":/") != "https":
+            raise ValueError("CWSandboxProvider requires HTTPS transport.")
+        self._image = image
         self._sdk = sdk if sdk is not None else _import_cwsandbox()
         self._base_url = base_url
         self._ingress_mode = ingress_mode
@@ -54,7 +66,6 @@ class CWSandboxProvider(ContainerProvider):
         self._profile_names = profile_names
         self._runner_ids = runner_ids
         self._cmd = cmd
-        self._url_scheme = url_scheme.rstrip(":/")
         self._delete_on_stop = delete_on_stop
         self._ready_settle_seconds = ready_settle_seconds
         self._surface_server_logs = surface_server_logs
@@ -109,7 +120,7 @@ class CWSandboxProvider(ContainerProvider):
 
     def start_container(
         self,
-        image: str,
+        image: str | None = None,
         port: int | None = None,
         env_vars: dict[str, str] | None = None,
         **kwargs: Any,
@@ -120,6 +131,19 @@ class CWSandboxProvider(ContainerProvider):
                 "CWSandboxProvider already has an active sandbox. Call "
                 "stop_container() (or close()) before starting another; a "
                 "second start would orphan the running sandbox."
+            )
+
+        image = image if image is not None else self._image
+        if not image:
+            raise ValueError(
+                "CWSandboxProvider requires an image. Pass it to the constructor "
+                "or start_container()."
+            )
+        if not self._ingress_mode:
+            raise ValueError(
+                "CWSandboxProvider requires an explicit ingress_mode. Available "
+                "modes depend on the runner; ingress_mode='public' opts into "
+                "public access. No private ingress mode is assumed."
             )
 
         port = port or 8000
@@ -170,9 +194,9 @@ class CWSandboxProvider(ContainerProvider):
         self._sandbox = sandbox
         try:
             sandbox.wait(timeout=self._request_timeout_seconds)
+            self._base_env_url = self._base_url_from_sandbox(sandbox)
             server_cmd = cmd or self._discover_server_cmd(sandbox, port=port)
             self._start_server(sandbox, server_cmd)
-            self._base_env_url = self._base_url_from_sandbox(sandbox)
             return self._base_env_url
         except Exception:
             try:
@@ -337,16 +361,20 @@ class CWSandboxProvider(ContainerProvider):
             raise RuntimeError(
                 "Sandbox did not return service_address; cannot construct OpenEnv URL."
             )
-        if address.startswith(("http://", "https://")):
-            return address.rstrip("/")
-        return f"{self._url_scheme_from_sandbox(sandbox)}://{address}".rstrip("/")
-
-    def _url_scheme_from_sandbox(self, sandbox: Any) -> str:
-        exposed_ports = getattr(sandbox, "exposed_ports", None) or ()
-        for _port, name in exposed_ports:
-            if name in {"http", "https"}:
-                return name
-        return self._url_scheme
+        parsed = urlsplit(address)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise RuntimeError(
+                "Sandbox must return an explicit HTTPS service_address. The "
+                "SDK's bare addresses and exposed-port names do not establish "
+                "TLS support; url_scheme cannot enable TLS. Configure a runner "
+                "with verified HTTPS ingress before using this provider."
+            )
+        return address.rstrip("/")
 
     def _server_process_dead(self) -> bool:
         sandbox = self._sandbox

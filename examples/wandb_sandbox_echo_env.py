@@ -1,4 +1,10 @@
-"""Run the hosted OpenEnv Echo Space on W&B Serverless Sandboxes.
+"""Conditional W&B Sandbox example: requires verified HTTPS ingress.
+
+The cwsandbox v0.23.3 documented bare service address is unsupported. This
+example fails closed and cleans up when the backend does not return an explicit
+HTTPS URL. Setting url_scheme or naming a port "https" does not configure TLS.
+Confirm runner TLS support before provisioning; this is not a verified hosted
+W&B end-to-end example. Public ingress below is an explicit opt-in.
 
 Usage:
     wandb login

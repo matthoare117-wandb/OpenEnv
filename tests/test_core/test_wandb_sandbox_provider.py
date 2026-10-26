@@ -49,7 +49,7 @@ class _FakeSandbox:
         self.sandbox_id = "sandbox-123"
         self.runner_id = "runner-123"
         self.started_at = "2026-06-22T00:00:00Z"
-        self.service_address = "wandb-sandbox.example.test:8000"
+        self.service_address = "https://wandb-sandbox.example.test:8000"
         self.exec_calls: list[list[str]] = []
         self.wait_calls: list[float | None] = []
         self.stopped = False
@@ -133,7 +133,7 @@ def test_start_container_uses_wandb_sandbox_sdk(fake_wandb_sdk):
     )
 
     kwargs = fake_wandb_sdk._sandbox_cls.last_run_kwargs
-    assert url == "http://wandb-sandbox.example.test:8000"
+    assert url == "https://wandb-sandbox.example.test:8000"
     assert fake_wandb_sdk._metadata_calls == ["openenv"]
     assert kwargs["container_image"] == "registry.hf.space/openenv-echo-env:latest"
     assert kwargs["environment_variables"] == {"WB_CHECK_VAR": "from-openenv"}
@@ -145,7 +145,7 @@ def test_start_container_uses_wandb_sandbox_sdk(fake_wandb_sdk):
 
 
 def test_wandb_provider_inherits_cwsandbox_provider(fake_wandb_sdk):
-    provider = WandbSandboxProvider(sdk=fake_wandb_sdk)
+    provider = WandbSandboxProvider(ingress_mode="public", sdk=fake_wandb_sdk)
 
     assert isinstance(provider, CWSandboxProvider)
 
@@ -165,7 +165,7 @@ def test_preflight_rejects_invalid_wandb_auth(fake_wandb_sdk):
 
 
 def test_stop_container_deletes_wandb_sandbox(fake_wandb_sdk):
-    provider = WandbSandboxProvider(sdk=fake_wandb_sdk)
+    provider = WandbSandboxProvider(ingress_mode="public", sdk=fake_wandb_sdk)
     provider.start_container("echo-env:latest")
 
     provider.stop_container()
@@ -184,7 +184,7 @@ def test_stop_container_deletes_wandb_sandbox(fake_wandb_sdk):
 
 
 def test_wandb_provider_inherits_active_sandbox_lifecycle_guard(fake_wandb_sdk):
-    provider = WandbSandboxProvider(sdk=fake_wandb_sdk)
+    provider = WandbSandboxProvider(ingress_mode="public", sdk=fake_wandb_sdk)
     provider.start_container("echo-env:latest")
 
     with pytest.raises(RuntimeError, match="already has an active sandbox"):

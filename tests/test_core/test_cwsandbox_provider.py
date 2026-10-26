@@ -368,3 +368,28 @@ def test_missing_cwsandbox_dependency_raises_runtime_error():
     with patch("builtins.__import__", side_effect=fake_import):
         with pytest.raises(RuntimeError, match="requires cwsandbox"):
             CWSandboxProvider()
+
+
+@pytest.mark.parametrize("failure", ["stop", "delete", "both"])
+def test_failed_cleanup_preserves_ownership_for_retry(fake_sdk, failure):
+    provider = CWSandboxProvider(sdk=fake_sdk, delete_on_stop=failure != "stop")
+    provider.start_container("coding-env:latest", env_vars={"TOKEN": "secret-123"})
+    sandbox = fake_sdk._sandbox_cls.instance
+    if failure in ("stop", "both"):
+        sandbox.stop_error = RuntimeError("stop failed")
+    with patch.object(
+        fake_sdk.Sandbox, "delete", side_effect=RuntimeError("delete failed")
+    ):
+        with pytest.raises(RuntimeError, match="failed"):
+            provider.stop_container()
+    assert provider.sandbox_id == "sandbox-123"
+    assert provider._redact_values == {"secret-123"}
+    with pytest.raises(RuntimeError, match="already has an active sandbox"):
+        provider.start_container("other-env:latest")
+    sandbox.stop_error = None
+    provider.stop_container()
+    assert provider.sandbox_id is None
+    assert provider._redact_values == set()
+    with pytest.raises(RuntimeError, match="no active base_url"):
+        _ = provider.base_url
+    provider.stop_container()

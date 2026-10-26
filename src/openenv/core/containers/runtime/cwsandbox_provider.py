@@ -187,8 +187,6 @@ class CWSandboxProvider(ContainerProvider):
     def stop_container(self) -> None:
         """Stop and optionally delete the sandbox."""
         sandbox = self._sandbox
-        self._sandbox = None
-        self._base_env_url = None
         if sandbox is None:
             self._redact_values = set()
             return
@@ -201,21 +199,22 @@ class CWSandboxProvider(ContainerProvider):
             if not self._is_sandbox_not_running_error(exc):
                 stop_error = exc
         finally:
-            try:
-                if self._delete_on_stop and sandbox_id:
-                    self._result_with_retries(
-                        lambda: self._sdk.Sandbox.delete(
-                            sandbox_id,
-                            base_url=self._base_url,
-                            timeout_seconds=self._request_timeout_seconds,
-                            missing_ok=True,
-                        )
+            if self._delete_on_stop and sandbox_id:
+                self._result_with_retries(
+                    lambda: self._sdk.Sandbox.delete(
+                        sandbox_id,
+                        base_url=self._base_url,
+                        timeout_seconds=self._request_timeout_seconds,
+                        missing_ok=True,
                     )
-            finally:
-                self._redact_values = set()
+                )
 
         if stop_error is not None:
             raise stop_error
+
+        self._sandbox = None
+        self._base_env_url = None
+        self._redact_values = set()
 
     def close(self) -> None:
         """Stop the active sandbox, if any."""
